@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(conda env *)",
+      "PowerShell(python -c \"import config, os; [print\\(n, getattr\\(config, n\\), '->', os.path.isdir\\(getattr\\(config, n\\)\\)\\) for n in ['SMAP_DIR','ERA5_DIR','CLDAS_DIR','STATIC_DIR','CACHE_DIR']]; print\\('exp_dir =', config.exp_dir\\(\\)\\); print\\('ckpt =', config.ckpt_path\\(\\)\\)\")",
+      "PowerShell(conda run *)"
+    ]
+  }
+}
