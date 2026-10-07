@@ -138,18 +138,19 @@ class ModelConfig:
 @dataclass
 class TrainConfig:
     seed:          int = 0
-    epochs:        int = 300
+    epochs:        int = 1000
     batch_size:    int = 2048      # 每步采样多少个站点
     batches_per_epoch: int = 400    # 每 epoch 采样批次数
     lr:            float = 3e-4      # 长 rollout 课程配套更低 LR（原 1e-3；K≥30 需更稳，见 free_run改进方向.md ①）
     weight_decay:  float = 1e-5
     grad_clip:     float = 0.5       # 更强梯度裁剪（原 1.0；长 rollout 梯度易爆）
     # rollout 课程：epoch 阈值 -> 展开步长 K。
-    #   0~11 K=1 → 12~59 K=7 → 60~139 K=30 → 140~219 K=60 → 220~299 K=120
-    #   注意：K 越大每 epoch 越慢（K=30 实测 ~60 min/epoch，K=120 约为其 4 倍），且长 rollout 更易震荡，
+    #   0~99 K=1 → 100~299 K=7 → 300~499 K=30 → 500~799 K=60 → 800~999 K=120
+    #   注意：K 越大每 epoch 越慢（K=120 约 6 min/epoch），且长 rollout 更易震荡，
     #   务必配合低 LR + 强 grad_clip；建议先小试（如只到 K=30），确认不爆再往上加。
-    rollout_schedule: dict = field(default_factory=lambda: {0: 1, 12: 7, 60: 30, 140: 60, 220: 120})
+    rollout_schedule: dict = field(default_factory=lambda: {0: 1, 100: 7, 300: 30, 500: 60, 800: 120})
     lambda_delta:  float = 0.0     # ΔSM 正则（原始单位下增量本就很小，默认 0，开启则趋向持久化）
+    noise_sigma:   float = 0.01     # 状态注入噪声 σ（m³/m³，零均值高斯）；0=关闭，开启如 0.01（见 free_run改进方向.md ③）
     # 训练期每步用真值初始状态（teacher forcing 起点）；false 则用上一步预测继续
     teacher_init:  bool = True
     device:        str = "auto"    # "auto"=有 CUDA 用 cuda，否则 cpu；也可显式写 "cuda"/"cpu"

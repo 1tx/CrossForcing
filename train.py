@@ -121,7 +121,14 @@ def main():
                 sb = static[sites]
                 loss = 0.0
                 for s in range(k):
-                    state, delta = model(state, fwin[:, s, :], sb)
+                    # 噪声注入（③）：扰动每步输入状态，但递推轨迹保持干净（方案 A，噪声不累积）
+                    state_in = state
+                    if tc.noise_sigma > 0:
+                        state_in = state + torch.randn_like(state) * tc.noise_sigma
+                    _, delta = model(state_in, fwin[:, s, :], sb)
+                    state = state + delta
+                    if mc.state_clip is not None:
+                        state = torch.clamp(state, mc.state_clip[0], mc.state_clip[1])
                     loss = loss + F.mse_loss(state, twin[:, s, :])
                     if tc.lambda_delta > 0:
                         loss = loss + tc.lambda_delta * (delta ** 2).mean()

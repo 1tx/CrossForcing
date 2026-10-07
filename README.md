@@ -180,14 +180,15 @@ device: str = "auto"
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `seed` | `0` | 随机种子 |
-| `epochs` | `300` | 训练轮数 |
+| `epochs` | `1000` | 训练轮数 |
 | `batch_size` | `2048` | 每步采样站点数（有放回随机采样） |
 | `batches_per_epoch` | `400` | 每 epoch 采样批次数 |
 | `lr` | `3e-4` | 学习率（长 rollout 课程配套更低 LR） |
 | `weight_decay` | `1e-5` | Adam 权重衰减 |
 | `grad_clip` | `0.5` | 梯度裁剪阈值（长 rollout 课程配套更强裁剪） |
-| `rollout_schedule` | `{0:1, 12:7, 60:30, 140:60, 220:120}` | 长 rollout 课程：epoch 阈值→展开步长 K（详见 9.2） |
+| `rollout_schedule` | `{0:1, 100:7, 300:30, 500:60, 800:120}` | 长 rollout 课程：epoch 阈值→展开步长 K（详见 9.2） |
 | `lambda_delta` | `0.0` | ΔSM 正则系数（默认 0；>0 会趋向持久化） |
+| `noise_sigma` | `0.01` | 状态注入噪声 σ（m³/m³，零均值高斯）；0=关闭 |
 | `teacher_init` | `True` | 每步用真值初始状态（当前实现恒为真值起点） |
 | `device` | `"auto"` | 计算设备：`auto` / `cuda` / `cpu` |
 
@@ -416,17 +417,18 @@ L = (1/K) · Σ_{s=0}^{K-1} [ MSE( ŷ_{t+s}, y_{t+s} ) + λ_δ · mean(Δ_s²) ]
 |---|---|
 | 递推 | `state ← clamp(state + MLP([state, forcing, static]), 0, 1)`，窗口内部用上一步预测继续（自回归） |
 | 起点 | teacher forcing：每步 rollout 起点恒为真值 `y_{t0-1}`（`teacher_init=True`） |
-| rollout 课程 | K 随 epoch 增大：`{0:1, 12:7, 60:30, 140:60, 220:120}`（K=1→7→30→60→120），先单步后多步，缓解误差累积 |
+| rollout 课程 | K 随 epoch 增大：`{0:1, 100:7, 300:30, 500:60, 800:120}`（K=1→7→30→60→120），先单步后多步，缓解误差累积 |
 | 优化器 | Adam，`lr=3e-4`，`weight_decay=1e-5` |
 | 梯度 | `clip_grad_norm_(max_norm=0.5)`（长 rollout 深展开需更强裁剪防梯度爆炸） |
 | 物理约束 | 每步输出后 `clamp(θ, 0, 1)`（土壤体积含水量有效区间） |
+| 噪声注入 | `noise_sigma>0` 时每步输入状态加零均值高斯噪声 ε~N(0,σ²)，扰动输入但递推轨迹保持干净（方案 A） |
 | 量纲 | 不做预归一化，模型内部 `LayerNorm` 统一异构量纲 |
 | 验证 | 每 epoch 结束：随机抽 256 站点算 one-step RMSE、128 站点算 30 天 rollout RMSE |
 | 保存 | 每 5 个 epoch 及最后存一次权重到 `experiments/<EXPERIMENT>/weights/model_<version>_<source>.pt` |
 
 **长 rollout 课程实现**（`config.py` 的 `rollout_schedule` + `train.py` 的 delta 分支）：
 
-1. **课程表**：`rollout_schedule = {0:1, 12:7, 60:30, 140:60, 220:120}`，按 epoch 把展开步长 K 从 1 分阶段拉到 120；`k_for_epoch(epoch, schedule)` 遍历阈值查表得到当前 K。
+1. **课程表**：`rollout_schedule = {0:1, 100:7, 300:30, 500:60, 800:120}`，按 epoch 把展开步长 K 从 1 分阶段拉到 120；`k_for_epoch(epoch, schedule)` 遍历阈值查表得到当前 K。
 2. **K 步展开（整条图反传 BPTT）**：每个 batch 先按 K 采样窗口，再自回归展开 K 步，梯度穿过整条 K 步计算图：
    ```python
    idx = t0[:, None] + arange(k)                 # (B,K) 采样 K 个时间点
@@ -441,7 +443,18 @@ L = (1/K) · Σ_{s=0}^{K-1} [ MSE( ŷ_{t+s}, y_{t+s} ) + λ_δ · mean(Δ_s²) ]
    ```
 3. **配套稳定化**：`lr=3e-4`（更低）+ `grad_clip=0.5`（更强），防止深展开梯度爆炸。
 4. **采样上界随 K 收缩**：`t0 ∈ [tr_s+1, tr_e-K+1)`，保证 K 步窗口与起点 `t0-1` 不越出训练段（K=120 时 `tr_e-K+1=612`，仍有充足样本）。
-5. **成本**：单 epoch 耗时近似随 K 线性增长；K=30/60/120 约 1.5/3/6 分钟/epoch（CPU 全配置 2048×400），完整 300 epoch 课程约 14 小时。
+5. **成本**：单 epoch 耗时近似随 K 线性增长；K=30/60/120 约 1.5/3/6 分钟/epoch（CPU 全配置 2048×400），完整 1000 epoch 课程约 40 小时。
+
+**噪声注入（③，缓解 train/test 分布偏移）**：free-run 每步输入是模型自己的预测（带误差），训练时对每步输入状态加零均值高斯噪声 ε~N(0,σ²)，让模型对带误差输入鲁棒。采用「干净递推」方案 A——噪声只扰动输入、不进入递推轨迹，避免长 K 下随机游走（σ√K）累积漂移：
+
+   ```python
+   for s in range(k):
+       state_in = state + torch.randn_like(state) * tc.noise_sigma   # 仅扰动输入
+       _, delta = model(state_in, fwin[:, s, :], sb)
+       state = state + delta                                         # 干净递推（含 clamp）
+       loss = loss + F.mse_loss(state, twin[:, s, :])
+   ```
+   默认 `noise_sigma=0.01`（已开启）；0 关闭。噪声是零均值随机扰动，只提升对随机误差的鲁棒性，不针对系统性偏湿（后者靠 ① 长 rollout 与 ④ 通量守恒）。
 
 > **LSTM 版本的训练规则**（`version="lstm"` 时）：不做 rollout 课程，改为 teacher-forcing 的 lookback 采样——
 > 每 batch 随机抽站点与起点 `t0`（`t0 ∈ [tr_s+L, tr_e)`），用真值窗口 `[t0-L, t0)` 的状态+forcing 喂 LSTM，
@@ -456,7 +469,7 @@ L = (1/K) · Σ_{s=0}^{K-1} [ MSE( ŷ_{t+s}, y_{t+s} ) + λ_δ · mean(Δ_s²) ]
 
 - **功能**：根据 epoch 查表得到 rollout 步长 K。
 - **实现**：遍历 `schedule` 的 `(阈值, K)`（按阈值排序），取 `epoch >= 阈值` 的最大 K；默认 K=1。
-  例如 `{0:1, 12:7, 60:30, 140:60, 220:120}`：epoch 0~11→K=1、12~59→K=7、60~139→K=30、140~219→K=60、≥220→K=120。
+  例如 `{0:1, 100:7, 300:30, 500:60, 800:120}`：epoch 0~99→K=1、100~299→K=7、300~499→K=30、500~799→K=60、≥800→K=120。
 
 ### 9.5 `main()`
 
@@ -610,7 +623,7 @@ L = (1/K) · Σ_{s=0}^{K-1} [ MSE( ŷ_{t+s}, y_{t+s} ) + λ_δ · mean(Δ_s²) ]
   注意：物理自洽像元（S≤R 且 Z∈[0,1]）正反向精确互逆；个别不自洽像元（S>R，或根区饱和而表层偏低使 Z>1）
   会在正向被 clamp 到 [0,1]，反向还原与原始 SMAP 略有出入。
 - **`lambda_delta` 默认 0**：原始单位下 ΔSM 很小（~1e-3），开正则会过度鼓励持久化。
-- **长 rollout 课程（K=1→7→30→60→120）**：`rollout_schedule` 分阶段把展开步长从 1 拉到 120，配更低 LR（3e-4）+ 更强 grad_clip（0.5）以稳定深展开。诊断与 smoke 验证见 `free_run改进方向.md` 与 `smoke_rollout.py`。注意 K 越大单 epoch 越慢（K=120 约 6 min/epoch，完整 300 epoch 约 14 h CPU）。
+- **长 rollout 课程（K=1→7→30→60→120）**：`rollout_schedule` 分阶段把展开步长从 1 拉到 120，配更低 LR（3e-4）+ 更强 grad_clip（0.5）以稳定深展开。诊断与 smoke 验证见 `free_run改进方向.md` 与 `smoke_rollout.py`。注意 K 越大单 epoch 越慢（K=120 约 6 min/epoch，完整 1000 epoch 约 40 h CPU）。
 - **Static 仅 0-5cm 质地**：根区(0-100cm)质地以 0-5cm 为代理，是当前限制。
 - **`teacher_init` 未真正实现分支**：训练始终用真值起点，`false` 分支（用上一步预测继续）尚未落地。
 
