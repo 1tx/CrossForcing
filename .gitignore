@@ -1,0 +1,13 @@
+# Python 字节码
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 日志
+*.log
+
+# IDE
+.idea/
+
+# Claude Code 本地配置（每台机器各自维护，不入库）
+.claude/settings.local.json
