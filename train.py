@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-训练显式状态算子 DeltaOperator（或隐状态 LSTM 基线）：rollout 课程式训练（K: 1 -> 7）。
+训练显式状态算子 DeltaOperator（或隐状态 LSTM 基线）：rollout 课程式训练（K: 1 -> 7 -> 30 -> 60 -> 120）。
 
 模型切换：config.py 的 ModelConfig.version —— "delta"（默认）或 "lstm"。
   - delta：单步递推 state_t=clamp(state_{t-1} + MLP([state_{t-1},F_t,static]))，rollout K 步训练。

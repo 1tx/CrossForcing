@@ -20,6 +20,7 @@ STEPS = [
     ("train", "train.py"),
     ("evaluate", "evaluate.py"),
     ("predict", "predict.py"),
+    ("diagnose", "diagnose_freerun.py"),
 ]
 
 

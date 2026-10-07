@@ -27,11 +27,11 @@ FILL_VALUE = -9999.0
 
 # 主驱动数据集："era5" 或 "cldas"。切换训练/评估/推理的 forcing 只需改这一处。
 # 两者都是 6 个 forcing 变量，模型输入维度不变，无需改网络结构。
-SOURCE = "era5"
+SOURCE = "cldas"
 
 # 实验标识：做多实验时改这里，所有输入缓存与输出文件会自动落到
 # cache/experiments/<EXPERIMENT>/ 下（pack/weights/eval/predict 分子目录），实现实验间隔离。
-EXPERIMENT = "cross_forcing_era5"
+EXPERIMENT = "long_rollout_cldas"
 
 # 网格坐标（四源已对齐同一 160x200 网格：lat 38.05~53.95，lon 115.05~134.95）
 GRID_LAT0 = 38.05
@@ -141,11 +141,14 @@ class TrainConfig:
     epochs:        int = 300
     batch_size:    int = 2048      # 每步采样多少个站点
     batches_per_epoch: int = 400    # 每 epoch 采样批次数
-    lr:            float = 1e-3
+    lr:            float = 3e-4      # 长 rollout 课程配套更低 LR（原 1e-3；K≥30 需更稳，见 free_run改进方向.md ①）
     weight_decay:  float = 1e-5
-    grad_clip:     float = 1.0
-    # rollout 课程：epoch 阈值 -> 展开步长 K（0~11 用 K=1，>=12 用 K=7；K=30 实测不稳，暂不用）
-    rollout_schedule: dict = field(default_factory=lambda: {0: 1, 12: 7})
+    grad_clip:     float = 0.5       # 更强梯度裁剪（原 1.0；长 rollout 梯度易爆）
+    # rollout 课程：epoch 阈值 -> 展开步长 K。
+    #   0~11 K=1 → 12~59 K=7 → 60~139 K=30 → 140~219 K=60 → 220~299 K=120
+    #   注意：K 越大每 epoch 越慢（K=30 实测 ~60 min/epoch，K=120 约为其 4 倍），且长 rollout 更易震荡，
+    #   务必配合低 LR + 强 grad_clip；建议先小试（如只到 K=30），确认不爆再往上加。
+    rollout_schedule: dict = field(default_factory=lambda: {0: 1, 12: 7, 60: 30, 140: 60, 220: 120})
     lambda_delta:  float = 0.0     # ΔSM 正则（原始单位下增量本就很小，默认 0，开启则趋向持久化）
     # 训练期每步用真值初始状态（teacher forcing 起点）；false 则用上一步预测继续
     teacher_init:  bool = True

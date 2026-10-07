@@ -24,8 +24,8 @@ from model import build_model, free_run
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--experiment", default="cross_forcing_era5", help="实验标识（cache/experiments/<exp>）")
-    ap.add_argument("--source", default="era5", help="训练源 era5/cldas（决定权重文件名与 pack 缓存）")
+    ap.add_argument("--experiment", default=config.EXPERIMENT, help="实验标识（cache/experiments/<exp>）")
+    ap.add_argument("--source", default=config.SOURCE, help="训练源 era5/cldas（决定权重文件名与 pack 缓存）")
     ap.add_argument("--sites", type=int, default=6, help="随机选的站点数")
     ap.add_argument("--seed", type=int, default=0, help="随机种子")
     args = ap.parse_args()

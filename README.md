@@ -180,13 +180,13 @@ device: str = "auto"
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `seed` | `0` | 随机种子 |
-| `epochs` | `30` | 训练轮数 |
+| `epochs` | `300` | 训练轮数 |
 | `batch_size` | `2048` | 每步采样站点数（有放回随机采样） |
-| `batches_per_epoch` | `40` | 每 epoch 采样批次数 |
-| `lr` | `1e-3` | 学习率 |
+| `batches_per_epoch` | `400` | 每 epoch 采样批次数 |
+| `lr` | `3e-4` | 学习率（长 rollout 课程配套更低 LR） |
 | `weight_decay` | `1e-5` | Adam 权重衰减 |
-| `grad_clip` | `1.0` | 梯度裁剪阈值 |
-| `rollout_schedule` | `{0: 1, 12: 7}` | rollout 课程：epoch 阈值→展开步长 K（0~11 用 K=1，≥12 用 K=7） |
+| `grad_clip` | `0.5` | 梯度裁剪阈值（长 rollout 课程配套更强裁剪） |
+| `rollout_schedule` | `{0:1, 12:7, 60:30, 140:60, 220:120}` | 长 rollout 课程：epoch 阈值→展开步长 K（详见 9.2） |
 | `lambda_delta` | `0.0` | ΔSM 正则系数（默认 0；>0 会趋向持久化） |
 | `teacher_init` | `True` | 每步用真值初始状态（当前实现恒为真值起点） |
 | `device` | `"auto"` | 计算设备：`auto` / `cuda` / `cpu` |
@@ -393,7 +393,7 @@ rollout 课程式训练：`K` 从 1 逐步增大到 7，让模型先学会单步
 
 要点：
 
-- 采样是**随机的、有放回的**：每 epoch 共 `batches_per_epoch × batch_size = 40×2048 = 81920` 个
+- 采样是**随机的、有放回的**：每 epoch 共 `batches_per_epoch × batch_size = 400×2048 = 819200` 个
   `(站点, 起点)` 样本，**不遍历**全量样本（全量规模为 N×天数 量级），属标准小批量随机梯度采样；
   因此某些站点/时间点会被重复抽到。
 - 时间起点上界 `tr_e-K+1`、下界 `tr_s+1`，保证 rollout 窗口与起点状态 `t0-1` 均不越出 train 段边界。
@@ -416,13 +416,32 @@ L = (1/K) · Σ_{s=0}^{K-1} [ MSE( ŷ_{t+s}, y_{t+s} ) + λ_δ · mean(Δ_s²) ]
 |---|---|
 | 递推 | `state ← clamp(state + MLP([state, forcing, static]), 0, 1)`，窗口内部用上一步预测继续（自回归） |
 | 起点 | teacher forcing：每步 rollout 起点恒为真值 `y_{t0-1}`（`teacher_init=True`） |
-| rollout 课程 | K 随 epoch 增大：`{0:1, 12:7}`（0~11 用 K=1，≥12 用 K=7），先单步后多步，缓解误差累积 |
-| 优化器 | Adam，`lr=1e-3`，`weight_decay=1e-5` |
-| 梯度 | `clip_grad_norm_(max_norm=1.0)` |
+| rollout 课程 | K 随 epoch 增大：`{0:1, 12:7, 60:30, 140:60, 220:120}`（K=1→7→30→60→120），先单步后多步，缓解误差累积 |
+| 优化器 | Adam，`lr=3e-4`，`weight_decay=1e-5` |
+| 梯度 | `clip_grad_norm_(max_norm=0.5)`（长 rollout 深展开需更强裁剪防梯度爆炸） |
 | 物理约束 | 每步输出后 `clamp(θ, 0, 1)`（土壤体积含水量有效区间） |
 | 量纲 | 不做预归一化，模型内部 `LayerNorm` 统一异构量纲 |
 | 验证 | 每 epoch 结束：随机抽 256 站点算 one-step RMSE、128 站点算 30 天 rollout RMSE |
 | 保存 | 每 5 个 epoch 及最后存一次权重到 `experiments/<EXPERIMENT>/weights/model_<version>_<source>.pt` |
+
+**长 rollout 课程实现**（`config.py` 的 `rollout_schedule` + `train.py` 的 delta 分支）：
+
+1. **课程表**：`rollout_schedule = {0:1, 12:7, 60:30, 140:60, 220:120}`，按 epoch 把展开步长 K 从 1 分阶段拉到 120；`k_for_epoch(epoch, schedule)` 遍历阈值查表得到当前 K。
+2. **K 步展开（整条图反传 BPTT）**：每个 batch 先按 K 采样窗口，再自回归展开 K 步，梯度穿过整条 K 步计算图：
+   ```python
+   idx = t0[:, None] + arange(k)                 # (B,K) 采样 K 个时间点
+   fwin = forcing[sites[:, None], idx, :]        # (B,K,F)
+   twin = target[sites[:, None], idx, :]         # (B,K,2)
+   state = target[sites, t0 - 1]                 # teacher-forcing 起点真值
+   loss = 0.0
+   for s in range(k):
+       state, delta = model(state, fwin[:, s, :], static[sites])
+       loss = loss + F.mse_loss(state, twin[:, s, :])
+   loss = loss / k                               # 对 K 平均，避免长 rollout 放大 loss 量级
+   ```
+3. **配套稳定化**：`lr=3e-4`（更低）+ `grad_clip=0.5`（更强），防止深展开梯度爆炸。
+4. **采样上界随 K 收缩**：`t0 ∈ [tr_s+1, tr_e-K+1)`，保证 K 步窗口与起点 `t0-1` 不越出训练段（K=120 时 `tr_e-K+1=612`，仍有充足样本）。
+5. **成本**：单 epoch 耗时近似随 K 线性增长；K=30/60/120 约 1.5/3/6 分钟/epoch（CPU 全配置 2048×400），完整 300 epoch 课程约 14 小时。
 
 > **LSTM 版本的训练规则**（`version="lstm"` 时）：不做 rollout 课程，改为 teacher-forcing 的 lookback 采样——
 > 每 batch 随机抽站点与起点 `t0`（`t0 ∈ [tr_s+L, tr_e)`），用真值窗口 `[t0-L, t0)` 的状态+forcing 喂 LSTM，
@@ -437,7 +456,7 @@ L = (1/K) · Σ_{s=0}^{K-1} [ MSE( ŷ_{t+s}, y_{t+s} ) + λ_δ · mean(Δ_s²) ]
 
 - **功能**：根据 epoch 查表得到 rollout 步长 K。
 - **实现**：遍历 `schedule` 的 `(阈值, K)`（按阈值排序），取 `epoch >= 阈值` 的最大 K；默认 K=1。
-  例如 `{0:1, 12:7}`：epoch 0~11 → K=1，epoch ≥12 → K=7。
+  例如 `{0:1, 12:7, 60:30, 140:60, 220:120}`：epoch 0~11→K=1、12~59→K=7、60~139→K=30、140~219→K=60、≥220→K=120。
 
 ### 9.5 `main()`
 
@@ -591,7 +610,7 @@ L = (1/K) · Σ_{s=0}^{K-1} [ MSE( ŷ_{t+s}, y_{t+s} ) + λ_δ · mean(Δ_s²) ]
   注意：物理自洽像元（S≤R 且 Z∈[0,1]）正反向精确互逆；个别不自洽像元（S>R，或根区饱和而表层偏低使 Z>1）
   会在正向被 clamp 到 [0,1]，反向还原与原始 SMAP 略有出入。
 - **`lambda_delta` 默认 0**：原始单位下 ΔSM 很小（~1e-3），开正则会过度鼓励持久化。
-- **K=30 rollout 已弃用**：长 rollout 使 `val_roll30` 恶化且单 epoch 极慢，当前用 K=1→7（见 `开发问题总结.md`）。
+- **长 rollout 课程（K=1→7→30→60→120）**：`rollout_schedule` 分阶段把展开步长从 1 拉到 120，配更低 LR（3e-4）+ 更强 grad_clip（0.5）以稳定深展开。诊断与 smoke 验证见 `free_run改进方向.md` 与 `smoke_rollout.py`。注意 K 越大单 epoch 越慢（K=120 约 6 min/epoch，完整 300 epoch 约 14 h CPU）。
 - **Static 仅 0-5cm 质地**：根区(0-100cm)质地以 0-5cm 为代理，是当前限制。
 - **`teacher_init` 未真正实现分支**：训练始终用真值起点，`false` 分支（用上一步预测继续）尚未落地。
 
